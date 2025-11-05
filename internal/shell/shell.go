@@ -101,7 +101,7 @@ func (s *Shell) Exec(ctx context.Context, command string) (string, string, error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.execPOSIX(ctx, command, nil)
+	return s.exec(ctx, command, nil)
 }
 
 // ExecWithStdin executes a command in the shell with the given stdin
@@ -109,7 +109,7 @@ func (s *Shell) ExecWithStdin(ctx context.Context, command string, stdin string)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.execPOSIX(ctx, command, strings.NewReader(stdin))
+	return s.exec(ctx, command, strings.NewReader(stdin))
 }
 
 // GetWorkingDir returns the current working directory
@@ -237,8 +237,8 @@ func (s *Shell) blockHandler() func(next interp.ExecHandlerFunc) interp.ExecHand
 	}
 }
 
-// execPOSIX executes commands using POSIX shell emulation (cross-platform)
-func (s *Shell) execPOSIX(ctx context.Context, command string, stdin *strings.Reader) (string, string, error) {
+// exec executes commands using a cross-platform shell interpreter.
+func (s *Shell) exec(ctx context.Context, command string, stdin *strings.Reader) (string, string, error) {
 	line, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
 		return "", "", fmt.Errorf("could not parse command: %w", err)
@@ -254,7 +254,7 @@ func (s *Shell) execPOSIX(ctx context.Context, command string, stdin *strings.Re
 		interp.Interactive(false),
 		interp.Env(expand.ListEnviron(s.env...)),
 		interp.Dir(s.cwd),
-		interp.ExecHandlers(s.blockHandler(), coreutils.ExecHandler),
+		interp.ExecHandlers(s.execHandlers()...),
 	)
 	if err != nil {
 		return "", "", fmt.Errorf("could not run command: %w", err)
@@ -262,12 +262,21 @@ func (s *Shell) execPOSIX(ctx context.Context, command string, stdin *strings.Re
 
 	err = runner.Run(ctx, line)
 	s.cwd = runner.Dir
-	s.env = []string{}
 	for name, vr := range runner.Vars {
 		s.env = append(s.env, fmt.Sprintf("%s=%s", name, vr.Str))
 	}
-	s.logger.InfoPersist("POSIX command finished", "command", command, "err", err)
+	s.logger.InfoPersist("command finished", "command", command, "err", err)
 	return stdout.String(), stderr.String(), err
+}
+
+func (s *Shell) execHandlers() []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	handlers := []func(next interp.ExecHandlerFunc) interp.ExecHandlerFunc{
+		s.blockHandler(),
+	}
+	if useGoCoreUtils {
+		handlers = append(handlers, coreutils.ExecHandler)
+	}
+	return handlers
 }
 
 // IsInterrupt checks if an error is due to interruption
